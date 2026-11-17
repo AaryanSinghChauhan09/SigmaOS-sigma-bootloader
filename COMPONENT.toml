@@ -3,7 +3,7 @@ name = "SigmaOS-sigma-bootloader"
 tier = 2
 stability = "scaffold"
 language = "rust"
-description = "sigma-bootloader component"
+description = "SigmaOS sigma-bootloader - modular Rust crate for the SigmaOS system"
 upstream = []
 
 [contract]
