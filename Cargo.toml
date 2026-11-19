@@ -1,10 +1,15 @@
 [package]
-name = "sigma-bootloader"
-version = "0.2.0"
+name = "SigmaOS-sigma-bootloader"
+version = "0.1.0"
 edition = "2021"
-authors = ["Aaryan Singh Chauhan <aaryan.singh.chauhan.09@gmail.com>"]
-description = "SigmaOS Bootloader Integration - inspired by Linux Mint m1n1 and Omarchy Linux"
-license = "GPL-3.0-or-later"
+license = "Apache-2.0"
+description = "SigmaOS sigma_bootloader component"
+
+[lib]
+name = "sigma_bootloader"
+path = "src/lib.rs"
 
 [dependencies]
-sigma-system = { path = "../sigma-system" }
+thiserror = "1"
+
+[dev-dependencies]
