@@ -1,15 +1,15 @@
 [package]
-name = "SigmaOS-sigma-bootloader"
+name = "sigmaos-sigma-bootloader"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
-description = "SigmaOS sigma_bootloader component"
+license = "GPL-3.0-or-later"
+description = "SigmaOS bootloader — Multiboot2 header/tag generation and kernel handoff"
 
 [lib]
 name = "sigma_bootloader"
 path = "src/lib.rs"
 
 [dependencies]
-thiserror = "1"
 
-[dev-dependencies]
+[features]
+default = []

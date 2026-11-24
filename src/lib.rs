@@ -1,131 +1,240 @@
-//! SigmaOS-sigma_bootloader — sigma_bootloader component for SigmaOS
+//! SigmaOS bootloader — Multiboot2 boot header and tag generation.
+//!
+//! Produces the MB2 header embedded in the kernel image: magic, arch,
+//! header length, checksum, and header tags requesting framebuffer,
+//! memory map, and module loading.
+
+#![no_std]
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
 
-use thiserror::Error;
+extern crate alloc;
 
-/// Error types for this component.
-#[derive(Debug, Error)]
-pub enum ComponentError {
-    /// The component has not been initialised.
-    #[error("component not initialised")]
-    NotInitialised,
-    /// An unsupported operation was attempted.
-    #[error("unsupported operation: {0}")]
-    Unsupported(&'static str),
+use alloc::vec::Vec;
+
+/// Multiboot2 boot header magic.
+pub const MB2_BOOT_MAGIC: u32 = 0x1BAD_B002;
+
+/// Architecture: i386 (protected/long mode via our own entry).
+pub const ARCH_I386: u32 = 0;
+
+/// Header tag types.
+pub mod tag_type {
+    pub const END: u16 = 0;
+    pub const INFORMATION_REQUEST: u16 = 1;
+    pub const ADDRESS: u16 = 2;
+    pub const FLAGS: u16 = 3;
+    pub const FRAMEBUFFER: u16 = 5;
+    pub const MODULE: u16 = 7;
+    pub const RANDOM: u16 = 6;
 }
 
-/// Convenience result type.
-pub type ComponentResult<T> = Result<T, ComponentError>;
-
-/// Core component struct for sigma_bootloader.
-#[derive(Debug, Default, Clone)]
-pub struct Component {
-    initialised: bool,
-    name: String,
+/// Information request tag flag bits (info tag types we want).
+pub mod info_flags {
+    pub const MEM_MAP: u32 = 1 << 6;
+    pub const FRAMEBUFFER: u32 = 1 << 5;
+    pub const CMDLINE: u32 = 1 << 2;
+    pub const BOOT_LOADER_NAME: u32 = 1 << 1;
+    pub const MEMORY_MAP: u32 = MEM_MAP;
 }
 
-impl Component {
-    /// Create a new, uninitialised component.
-    pub fn new() -> Self {
-        Self {
-            initialised: false,
-            name: String::from("sigma_bootloader"),
+/// Errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootError {
+    /// Header layout invalid.
+    InvalidHeader(&'static str),
+    /// Checksum mismatch.
+    BadChecksum,
+    /// Module path too long.
+    ModuleNameTooLong,
+}
+
+/// A module to load alongside the kernel (e.g. initramfs).
+#[derive(Debug, Clone)]
+pub struct Module {
+    /// Path string passed to the kernel via MB2 module tag.
+    pub name: alloc::string::String,
+    /// Load address (physical).
+    pub addr: u64,
+    /// Size in bytes.
+    pub size: u64,
+}
+
+/// The complete MB2 header: fixed part + tags.
+#[derive(Debug, Clone)]
+pub struct Mb2Header {
+    /// Magic (always MB2_BOOT_MAGIC).
+    pub magic: u32,
+    /// Architecture.
+    pub arch: u32,
+    /// Total header length including tags, 8-aligned.
+    pub header_length: u32,
+    /// checksum = -(magic+arch+len+checksum) mod 2^32 == 0
+    pub checksum: u32,
+    /// Serialized header tags.
+    pub tags: Vec<u8>,
+}
+
+impl Mb2Header {
+    /// Build a header requesting standard SigmaOS boot info.
+    pub fn sigmaos_default(kernel_addr: u64, modules: &[Module]) -> Result<Self, BootError> {
+        let mut tags = Vec::new();
+
+        // Information request: mem map, framebuffer, cmdline, boot loader name
+        push_info_request(&mut tags, info_flags::MEM_MAP | info_flags::FRAMEBUFFER
+            | info_flags::CMDLINE | info_flags::BOOT_LOADER_NAME);
+
+        // Framebuffer request: width/height any, depth 32
+        push_tag(&mut tags, tag_type::FRAMEBUFFER, &fb_request_body());
+
+        // Kernel address tag (where MB2 expects the kernel)
+        push_tag(&mut tags, tag_type::ADDRESS, &addr_body(kernel_addr));
+
+        // Module tags: one per module
+        for m in modules {
+            let mut body = Vec::new();
+            body.extend_from_slice(&m.addr.to_le_bytes());
+            body.extend_from_slice(&m.size.to_le_bytes());
+            body.extend_from_slice(&0u32.to_le_bytes()); // string offset (patched later)
+            body.extend_from_slice(m.name.as_bytes());
+            body.push(0);
+            push_tag(&mut tags, tag_type::MODULE, &body);
         }
+
+        // End tag
+        push_tag(&mut tags, tag_type::END, &[]);
+
+        let header_length = (8 + tags.len() as u32 + 7) & !7;
+        let mut h = Self {
+            magic: MB2_BOOT_MAGIC,
+            arch: ARCH_I386,
+            header_length,
+            checksum: 0,
+            tags,
+        };
+        h.checksum = h.compute_checksum();
+        Ok(h)
     }
 
-    /// Initialise the component.
-    pub fn init(&mut self) -> ComponentResult<()> {
-        self.initialised = true;
+    /// checksum such that magic+arch+len+checksum == 0 mod 2^32.
+    fn compute_checksum(&self) -> u32 {
+        let sum = self.magic
+            .wrapping_add(self.arch)
+            .wrapping_add(self.header_length)
+            .wrapping_add(0u32);
+        0u32.wrapping_sub(sum)
+    }
+
+    /// Verify the header checksum is self-consistent.
+    pub fn verify(&self) -> Result<(), BootError> {
+        let sum = self
+            .magic
+            .wrapping_add(self.arch)
+            .wrapping_add(self.header_length)
+            .wrapping_add(self.checksum);
+        if sum != 0 {
+            return Err(BootError::BadChecksum);
+        }
         Ok(())
     }
 
-    /// Returns true if the component has been initialised.
-    pub fn is_ready(&self) -> bool {
-        self.initialised
+    /// Serialize the complete header (fixed 8 bytes + tags) to bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&self.magic.to_le_bytes());
+        out.extend_from_slice(&self.arch.to_le_bytes());
+        out.extend_from_slice(&self.header_length.to_le_bytes());
+        out.extend_from_slice(&self.checksum.to_le_bytes());
+        out.extend_from_slice(&self.tags);
+        out
     }
+}
 
-    /// Execute the component's primary operation.
-    pub fn run(&self) -> ComponentResult<()> {
-        if !self.initialised {
-            return Err(ComponentError::NotInitialised);
-        }
-        Ok(())
+fn push_tag(out: &mut Vec<u8>, tag_type: u16, body: &[u8]) {
+    let size = 8 + body.len();
+    out.extend_from_slice(&tag_type.to_le_bytes());
+    out.extend_from_slice(&(size as u32).to_le_bytes());
+    out.extend_from_slice(body);
+    while out.len() % 8 != 0 {
+        out.push(0);
     }
+}
 
-    /// Return the component name.
-    pub fn name(&self) -> &str {
-        &self.name
+fn push_info_request(out: &mut Vec<u8>, flags: u32) {
+    // body: request array of u32 tag type ids + optional flags u32
+    let mut body = Vec::new();
+    for t in [6u32, 8, 1, 2] {
+        // mem map=6, framebuffer=8, cmdline=1, boot loader name=2
+        body.extend_from_slice(&t.to_le_bytes());
     }
+    body.extend_from_slice(&flags.to_le_bytes());
+    push_tag(out, tag_type::INFORMATION_REQUEST, &body);
+}
 
-    /// Reset the component to uninitialised state.
-    pub fn reset(&mut self) {
-        self.initialised = false;
-    }
+fn fb_request_body() -> Vec<u8> {
+    // width u32, height u32, depth u8, pad[5]
+    let mut b = Vec::new();
+    b.extend_from_slice(&0u32.to_le_bytes()); // any width
+    b.extend_from_slice(&0u32.to_le_bytes()); // any height
+    b.push(32); // depth
+    b.extend_from_slice(&[0u8; 5]);
+    b
+}
+
+fn addr_body(addr: u64) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&addr.to_le_bytes());
+    b
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
+    use alloc::vec;
 
     #[test]
-    fn test_new_not_ready_aaa() {
-        // Arrange + Act
-        let c = Component::new();
-        // Assert
-        assert!(!c.is_ready());
+    fn header_checksum_verifies() {
+        let h = Mb2Header::sigmaos_default(0x100000, &[]).unwrap();
+        assert_eq!(h.verify(), Ok(()));
+        assert_eq!(h.magic, MB2_BOOT_MAGIC);
     }
 
     #[test]
-    fn test_init_makes_ready_aaa() {
-        // Arrange
-        let mut c = Component::new();
-        // Act
-        c.init().unwrap();
-        // Assert
-        assert!(c.is_ready());
+    fn tampered_checksum_fails() {
+        let mut h = Mb2Header::sigmaos_default(0x100000, &[]).unwrap();
+        h.checksum ^= 1;
+        assert_eq!(h.verify(), Err(BootError::BadChecksum));
     }
 
     #[test]
-    fn test_run_before_init_fails_aaa() {
-        // Arrange
-        let c = Component::new();
-        // Act
-        let result = c.run();
-        // Assert
-        assert!(result.is_err());
+    fn header_is_aligned() {
+        let h = Mb2Header::sigmaos_default(0x100000, &[]).unwrap();
+        assert_eq!(h.header_length % 8, 0);
+        let bytes = h.to_bytes();
+        assert!(bytes.len() >= 8);
     }
 
     #[test]
-    fn test_run_after_init_succeeds_aaa() {
-        // Arrange
-        let mut c = Component::new();
-        c.init().unwrap();
-        // Act
-        let result = c.run();
-        // Assert
-        assert!(result.is_ok());
+    fn module_tags_present() {
+        let modules = vec![Module {
+            name: "initramfs.cpio".to_string(),
+            addr: 0x200000,
+            size: 0x10000,
+        }];
+        let h = Mb2Header::sigmaos_default(0x100000, &modules).unwrap();
+        let bytes = h.to_bytes();
+        // module name should appear in serialized tags
+        assert!(bytes.windows(14).any(|w| w == b"initramfs.cpio"));
     }
 
     #[test]
-    fn test_reset_clears_init_aaa() {
-        // Arrange
-        let mut c = Component::new();
-        c.init().unwrap();
-        assert!(c.is_ready());
-        // Act
-        c.reset();
-        // Assert
-        assert!(!c.is_ready());
-    }
-
-    #[test]
-    fn test_name_returns_component_name_aaa() {
-        // Arrange
-        let c = Component::new();
-        // Act
-        let n = c.name();
-        // Assert
-        assert!(!n.is_empty());
+    fn end_tag_is_last() {
+        let h = Mb2Header::sigmaos_default(0x100000, &[]).unwrap();
+        let bytes = h.to_bytes();
+        // last 8 bytes should be end tag (type 0, size 8)
+        // tag wire format: type u16, size u32, body, 8-byte aligned
+        let n = bytes.len();
+        assert_eq!(&bytes[n - 8..n - 6], &0u16.to_le_bytes());
+        assert_eq!(&bytes[n - 6..n - 2], &8u32.to_le_bytes());
     }
 }
