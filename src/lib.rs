@@ -154,7 +154,7 @@ fn push_tag(out: &mut Vec<u8>, tag_type: u16, body: &[u8]) {
     out.extend_from_slice(&tag_type.to_le_bytes());
     out.extend_from_slice(&(size as u32).to_le_bytes());
     out.extend_from_slice(body);
-    while out.len() % 8 != 0 {
+    while !out.len().is_multiple_of(8) {
         out.push(0);
     }
 }
