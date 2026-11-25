@@ -186,6 +186,67 @@ fn addr_body(addr: u64) -> Vec<u8> {
     b
 }
 
+/// Multiboot1 header — needed for bootloaders that only implement v1
+/// (e.g. QEMU's `-kernel` loader). 12-byte header:
+/// magic u32 (0x1BADB002), flags u32, checksum u32 where
+/// checksum = -(magic + flags).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mb1Header {
+    /// Boot flags (bit 0 = mem info valid, bit 16 = header offset).
+    pub flags: u32,
+    /// Offset of this header from the start of the file, when
+    /// `flags & (1<<16)` is set. 0 = header is at file offset 0.
+    pub header_offset: u32,
+}
+
+impl Mb1Header {
+    /// MB1 magic value.
+    pub const MAGIC: u32 = 0x1BAD_B002;
+
+    /// Create a header at the given file offset.
+    pub fn new(header_offset: u32) -> Self {
+        // bit 16 set → header offset field is used
+        Self { flags: 1 << 16, header_offset }
+    }
+
+    /// Serialize to 12 bytes (or 16 with offset field).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(16);
+        b.extend_from_slice(&Self::MAGIC.to_le_bytes());
+        b.extend_from_slice(&self.flags.to_le_bytes());
+        let mut sum = Self::MAGIC.wrapping_add(self.flags);
+        b.extend_from_slice(&0u32.to_le_bytes()); // checksum placeholder
+        if self.flags & (1 << 16) != 0 {
+            b.extend_from_slice(&self.header_offset.to_le_bytes());
+            sum = sum.wrapping_add(self.header_offset);
+        }
+        let checksum = 0u32.wrapping_sub(sum);
+        b[8..12].copy_from_slice(&checksum.to_le_bytes());
+        b
+    }
+
+    /// Verify checksum.
+    pub fn verify(&self, bytes: &[u8]) -> bool {
+        if bytes.len() < 12 {
+            return false;
+        }
+        let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        if magic != Self::MAGIC {
+            return false;
+        }
+        let flags = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let checksum = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let mut sum = magic.wrapping_add(flags).wrapping_add(checksum);
+        if flags & (1 << 16) != 0 {
+            if bytes.len() < 16 {
+                return false;
+            }
+            sum = sum.wrapping_add(u32::from_le_bytes(bytes[12..16].try_into().unwrap()));
+        }
+        sum == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +297,24 @@ mod tests {
         let n = bytes.len();
         assert_eq!(&bytes[n - 8..n - 6], &0u16.to_le_bytes());
         assert_eq!(&bytes[n - 6..n - 2], &8u32.to_le_bytes());
+    }
+
+    #[test]
+    fn mb1_header_checksum() {
+        let h = Mb1Header::new(0x1000);
+        let bytes = h.to_bytes();
+        assert_eq!(&bytes[0..4], &0x1BAD_B002u32.to_le_bytes());
+        assert!(h.verify(&bytes));
+        // tamper → fail
+        let mut bad = bytes.clone();
+        bad[4] ^= 0xff;
+        assert!(!h.verify(&bad));
+    }
+
+    #[test]
+    fn mb1_header_at_zero() {
+        // header at file offset 0 still uses offset field form
+        let h = Mb1Header::new(0);
+        assert!(h.verify(&h.to_bytes()));
     }
 }
