@@ -80,8 +80,13 @@ impl Mb2Header {
         let mut tags = Vec::new();
 
         // Information request: mem map, framebuffer, cmdline, boot loader name
-        push_info_request(&mut tags, info_flags::MEM_MAP | info_flags::FRAMEBUFFER
-            | info_flags::CMDLINE | info_flags::BOOT_LOADER_NAME);
+        push_info_request(
+            &mut tags,
+            info_flags::MEM_MAP
+                | info_flags::FRAMEBUFFER
+                | info_flags::CMDLINE
+                | info_flags::BOOT_LOADER_NAME,
+        );
 
         // Framebuffer request: width/height any, depth 32
         push_tag(&mut tags, tag_type::FRAMEBUFFER, &fb_request_body());
@@ -117,7 +122,8 @@ impl Mb2Header {
 
     /// checksum such that magic+arch+len+checksum == 0 mod 2^32.
     fn compute_checksum(&self) -> u32 {
-        let sum = self.magic
+        let sum = self
+            .magic
             .wrapping_add(self.arch)
             .wrapping_add(self.header_length)
             .wrapping_add(0u32);
@@ -206,7 +212,10 @@ impl Mb1Header {
     /// Create a header at the given file offset.
     pub fn new(header_offset: u32) -> Self {
         // bit 16 set → header offset field is used
-        Self { flags: 1 << 16, header_offset }
+        Self {
+            flags: 1 << 16,
+            header_offset,
+        }
     }
 
     /// Serialize to 12 bytes (or 16 with offset field).

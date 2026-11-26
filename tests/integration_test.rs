@@ -8,10 +8,19 @@ fn header_verifies_and_serializes() {
     h.verify().unwrap();
     let bytes = h.to_bytes();
     // fixed part: magic, arch, header_length, checksum
-    assert_eq!(u32::from_le_bytes(bytes[0..4].try_into().unwrap()), 0x1BAD_B002);
+    assert_eq!(
+        u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+        0x1BAD_B002
+    );
     assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 0);
-    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), h.header_length);
-    assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), h.checksum);
+    assert_eq!(
+        u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+        h.header_length
+    );
+    assert_eq!(
+        u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+        h.checksum
+    );
 }
 
 #[test]
@@ -38,5 +47,7 @@ fn module_roundtrip() {
     }];
     let h = Mb2Header::sigmaos_default(0x100000, &modules).unwrap();
     let bytes = h.to_bytes();
-    assert!(bytes.windows(4).any(|w| u16::from_le_bytes([w[0], w[1]]) == tag_type::MODULE));
+    assert!(bytes
+        .windows(4)
+        .any(|w| u16::from_le_bytes([w[0], w[1]]) == tag_type::MODULE));
 }
